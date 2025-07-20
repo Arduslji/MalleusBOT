@@ -330,7 +330,15 @@ async def main():
             os._exit(1)
 
         PORT = int(os.getenv("PORT", 8080))
-
+        ### <<< INSERISCI QUI >>> ###
+        # SICUREZZA: Recupera il secret token del webhook
+        # Questa riga è FONDAMENTALE e deve essere prima dell'uso di webhook_secret_token
+        webhook_secret_token = os.getenv("WEBHOOK_SECRET_TOKEN")
+        if not webhook_secret_token:
+            logging.critical("Errore: WEBHOOK_SECRET_TOKEN non impostato nelle variabili d'ambiente di Render. Necessario per la modalità webhook.")
+            sys.exit(1)
+        ### <<< FINE INSERIMENTO >>> ###
+        
         logging.debug(f"Ambiente Render rilevato. Avvio bot in modalità webhook.")
         logging.debug(f"Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
 
