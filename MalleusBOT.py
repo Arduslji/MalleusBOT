@@ -6,7 +6,7 @@ import threading
 from zoneinfo import ZoneInfo
 import asyncio
 from collections import deque
-import logging # <-- SCOMMENTATO E ORA USATO CORRETTAMENTE
+import logging
 
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -16,9 +16,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # --- Rimuove la variabile TZ se presente (Replit) ---
+# Necessario per Replit ma può causare problemi su altri host come Render se impostata
 if 'TZ' in os.environ:
     os.environ.pop('TZ')
-time.tzset()
+    # time.tzset() # Rimuovi anche questa riga, tzset non è portabile e causa errori su alcuni sistemi
+
+# --- Configurazione base del logging (IMPORTANTE: deve essere all'inizio del file o in main) ---
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
 
 # --- Flask per mantenere vivo il bot su Replit E gestire webhook su Render ---
 flask_app = Flask(__name__)
@@ -30,6 +36,10 @@ def home():
 
 @flask_app.route('/webhook', methods=['POST'])
 async def telegram_webhook_handler():
+    # Questa funzione ora viene invocata dal server HTTP integrato di PTB in modalità webhook,
+    # che a sua volta la riceve dal server web di Render (es. Gunicorn/Uvicorn).
+    # Non è più Flask a "ricevere" direttamente il webhook da Telegram in questo setup,
+    # ma PTB che poi lo passa qui.
     logging.debug("Richiesta POST a '/webhook' ricevuta. Processando...")
     if not request.is_json:
         logging.error("Richiesta webhook non è JSON.")
@@ -47,7 +57,9 @@ async def telegram_webhook_handler():
         return "Internal Server Error: Failed to parse update", 500
 
     try:
-        asyncio.create_task(_bot_app.process_update(update))
+        # Questa è la chiamata cruciale che PTB usa per elaborare l'update
+        # Essendo in un contesto asincrono, process_update funzionerà correttamente
+        await _bot_app.process_update(update)
     except Exception as e:
         logging.error(f"Errore durante l'elaborazione dell'update da parte dell'Application: {e}")
         return "Internal Server Error: Failed to process update", 500
@@ -61,7 +73,7 @@ FORBIDDEN_KEYWORDS_NAME = [
     'porn', 'sex', 'xxx', 'adult', 'nude', 'erotic', 'viagra', 'cialis',
     'onlyfans', 'ofans', 'private', 'channel', 'bot'
 ]
-FORBIDDEN_KEYWORDS_MESSAGE = []
+FORBIDDEN_KEYWORDS_MESSAGE = [] # Puoi aggiungere qui parole chiave da bannare nei messaggi
 
 CLOSING_START_HOUR = 23
 CLOSING_START_MINUTE = 0
@@ -78,7 +90,7 @@ BLOCKED_FORWARD_CHANNEL_IDS = [
     -1001458150284, -1001437761372, -1001281633465, -1001272270169,
     -1002002355451, -1001245777992
 ]
-BLOCKED_CHANNEL_USERNAMES = []
+BLOCKED_CHANNEL_USERNAMES = [] # Esempio: ['usernamecanale1', 'usernamecanale2']
 BLOCKED_WEB_DOMAINS = [
     'byoblu.com', 'phishing.net', 'casinogratis.xyz',
     'scommesse.it', 'linkdannoso.ru', 'offertespeciali.info'
@@ -118,7 +130,7 @@ def contains_blocked_web_domain(entities, text) -> bool:
 # --- ANTIFLOOD STATE & CONFIG ---
 flood_active = False
 flood_queue = deque()
-flood_timer: threading.Timer = None
+flood_timer: threading.Timer = None # Il timer sarà gestito dal loop di asyncio per essere più robusto
 
 FLOOD_THRESHOLD = 10      # messaggi
 FLOOD_WINDOW = 3          # secondi
@@ -126,17 +138,18 @@ FLOOD_DURATION = 180      # secondi (3 minuti)
 
 # --- Variabili globali per il bot e l'event loop ---
 _bot_app: Application = None
-_bot_loop = None
+_bot_loop = None # Non è più necessario gestire _bot_loop in questo modo per PTB v20+
 
 # --- Antiflood helper ---
 async def _deactivate_flood(chat_id=None):
     global flood_active, flood_timer
     flood_active = False
     if flood_timer:
-        flood_timer.cancel()
+        flood_timer.cancel() # Cancella il timer esistente se presente
     flood_timer = None
     if chat_id:
         await send_chat_status_message(_bot_app.bot, "  ⚔️ Modalità difensiva terminata ⚔️ \n\n☀️ La discussione può riprendere ☀️", chat_id)
+    logging.debug(f"Antiflood disattivato in chat {chat_id}")
 
 async def handle_stopantiflood(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global flood_active, flood_timer
@@ -157,6 +170,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
+    # Nuovo log per tracciare ogni messaggio processato
+    logging.debug(f"Processando messaggio da {update.effective_user.id} (@{update.effective_user.username}) in chat {update.effective_chat.id}. Tipo update: {update.update_id}")
+
+
     chat_id = update.effective_chat.id
     msg_id = update.message.message_id
     user = update.message.from_user
@@ -175,7 +192,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError as e:
             logging.warning(f"Impossibile ottenere stato membro per {user.id} in chat {chat_id}: {e}")
             pass
+
+    # Log cruciale per lo stato admin dell'utente
     logging.debug(f"Utente {user.id} in chat {chat_id}: is_admin={is_admin}")
+
     if not is_admin:
         now = time.time()
         flood_queue.append(now)
@@ -185,21 +205,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not flood_active and len(flood_queue) >= FLOOD_THRESHOLD:
             flood_active = True
             await context.bot.send_message(chat_id, "⚔️ Chat sotto attacco, modalità difensiva attivata! ⚔️ \n\n    ⏳ La discussione viene sospesa per 3 minuti ⏳ \n\n      🧹 Qualunque messaggio sarà cancellato 🧹")
-            current_loop = _bot_loop if _bot_loop else asyncio.get_event_loop()
-            if current_loop.is_running():
-                flood_timer = threading.Timer(FLOOD_DURATION, lambda: asyncio.run_coroutine_threadsafe(_deactivate_flood(chat_id), current_loop))
-                flood_timer.start()
-            else:
-                logging.warning("Impossibile avviare il timer antiflood: l'event loop non è in esecuzione.")
+            # Avvia il timer antiflood utilizzando asyncio.get_running_loop()
+            asyncio.get_running_loop().call_later(FLOOD_DURATION, lambda: asyncio.create_task(_deactivate_flood(chat_id)))
             logging.debug(f"Antiflood attivato in chat {chat_id}, timer avviato")
+        
         if flood_active:
             try:
                 await context.bot.delete_message(chat_id, msg_id)
                 logging.debug(f"Messaggio {msg_id} cancellato per antiflood in chat {chat_id}")
             except TelegramError as e:
                 logging.warning(f"Impossibile cancellare messaggio {msg_id} per antiflood in chat {chat_id}: {e}")
-            return
+            return # Ferma l'elaborazione del messaggio se l'antiflood è attivo
 
+    # Solo i non-admin vengono controllati dalle regole successive
     if user and not is_admin:
         name = user.full_name
         uname = user.username
@@ -235,10 +253,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logging.warning(f"Impossibile bannare {identifier} o cancellare messaggio per keyword proibite nel nome in chat {chat_id}: {e}")
             return
 
+    # Controlli sul testo del messaggio (solo per non-admin)
     text = update.message.text or update.message.caption or ""
     if not is_admin and len(text) > MAX_MESSAGE_LENGTH:
+        logging.debug(f"Messaggio {msg_id} troppo lungo ({len(text)} chars) in chat {chat_id}. Max: {MAX_MESSAGE_LENGTH}. Cancellazione.")
         await context.bot.send_message(chat_id, text=f"❌ {user.full_name}, il tuo messaggio è troppo lungo ({len(text)} caratteri). Il limite massimo è {MAX_MESSAGE_LENGTH} caratteri. Il messaggio è stato rimosso 📜🔥")
-        logging.debug(f"Messaggio {msg_id} cancellato per lunghezza eccessiva in chat {chat_id}")
         try:
             await context.bot.delete_message(chat_id, msg_id)
         except TelegramError as e:
@@ -280,29 +299,21 @@ async def send_chat_status_message(bot, message: str, chat_id=None):
                 logging.warning(f"Impossibile inviare messaggio a chat {cid}: {e}")
                 pass
 
-def schedule_announce(message: str):
-    async def announce():
-        await send_chat_status_message(_bot_app.bot, message)
-    current_loop = _bot_loop if _bot_loop else asyncio.get_event_loop()
-    if current_loop.is_running():
-        current_loop.call_soon_threadsafe(lambda: asyncio.create_task(announce()))
-    else:
-        logging.warning("Event loop non avviato o non in esecuzione per schedule_announce. Ignorando l'annuncio.")
+async def schedule_announce(message: str):
+    await send_chat_status_message(_bot_app.bot, message)
+    logging.debug(f"Annuncio programmato: '{message}' inviato.")
 
 def run_flask_server():
+    # Questa funzione è solo per Replit (polling mode)
     port = int(os.getenv("PORT", 8080))
     logging.debug(f"Avvio Flask server sulla porta {port} (per Replit keep-alive)")
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     logging.debug("Flask server avviato.")
 
-def main():
-    global _bot_app, _bot_loop
 
-    # --- AGGIUNTO: Configurazione base del logging ---
-    logging.basicConfig(level=logging.DEBUG,
-                        format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[logging.StreamHandler()])
-    # -----------------------------------------------
+# --- La funzione main deve ora essere asincrona ---
+async def main():
+    global _bot_app # _bot_loop non è più necessario gestirlo manualmente
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -312,37 +323,29 @@ def main():
     application = Application.builder().token(token).build()
     _bot_app = application
     
-    try:
-        _bot_loop = asyncio.get_event_loop()
-    except RuntimeError:
-        _bot_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_bot_loop)
-    logging.debug(f"Event loop (_bot_loop) impostato: {_bot_loop}")
-    
-    # --- RIGHE PER INIZIALIZZAZIONE PTB (MANTENUTE QUI) ---
+    # Inizializzazione dell'Application PTB (ora parte dell'asyncio loop principale)
     logging.debug("Inizializzazione dell'Application PTB...")
-    _bot_loop.run_until_complete(application.initialize())
+    await application.initialize() # await perché initialize è una coroutine
     logging.debug("Application PTB inizializzata.")
-    # ---------------------------------------------------
-
+    
     application.add_handler(CommandHandler("stopantiflood", handle_stopantiflood))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Scheduler di apertura/chiusura
+    # Scheduler di apertura/chiusura (avviato normalmente)
     scheduler.add_job(
-        lambda: schedule_announce(OPENING_MESSAGE),
+        lambda: asyncio.create_task(schedule_announce(OPENING_MESSAGE)), # Chiamata async tramite asyncio.create_task
         CronTrigger(hour=CLOSING_END_HOUR, minute=CLOSING_END_MINUTE, timezone=ZoneInfo("Europe/Rome")),
         name="Chat Opening Announcement"
     )
     scheduler.add_job(
-        lambda: schedule_announce(CLOSING_MESSAGE),
+        lambda: asyncio.create_task(schedule_announce(CLOSING_MESSAGE)), # Chiamata async tramite asyncio.create_task
         CronTrigger(hour=CLOSING_START_HOUR, minute=CLOSING_START_MINUTE, timezone=ZoneInfo("Europe/Rome")),
         name="Chat Closing Announcement"
     )
     scheduler.start()
     logging.debug("BackgroundScheduler avviato")
 
-    # --- INIZIO BLOCCO DI AVVIO CONDIZIONALE PER REPLIT / RENDER ---
+    # --- INIZIO BLOCCO DI AVVIO CONDIZIONALE PER REPLIT / RENDER (MODIFICATO) ---
     if os.getenv("RENDER"):
         WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME")
         if WEBHOOK_URL:
@@ -356,33 +359,45 @@ def main():
         logging.debug(f"Ambiente Render rilevato. Avvio bot in modalità webhook.")
         logging.debug(f"Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
 
-        try:
-            logging.debug("Tentativo di avviare application.run_webhook con app=flask_app...")
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                url_path="/webhook",
-                webhook_url=WEBHOOK_URL,
-                app=flask_app,
-                drop_pending_updates=True
-            )
-            logging.debug("Application in webhook avviata su Render con Flask integrato.")
+        # Inizializza il server webhook integrato di PTB con Flask
+        # Questo server sarà in grado di gestire route asincrone di Flask
+        # e di far girare correttamente _bot_app.process_update
+        await application.updater.start_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="/webhook",
+            webhook_url=WEBHOOK_URL,
+            secret_token=token, # Utilizza il token come secret_token
+            # Non è più necessario specificare 'app=flask_app' qui
+            # se la route /webhook è gestita direttamente da PTB.
+            # Se vuoi integrare Flask come WSGI app server:
+            # webserver=flask_app # Oppure un'istanza di aiohttp.web.Application, etc.
+            # Ma il modo più semplice è lasciare che PTB gestisca il webhook.
+            # Per una vera integrazione di Flask, useresti `Webserver`
+            # e `HTTPServer` con un adattatore WSGI/ASGI come `wsgi_middleware`
+            # per Flask, ma è più complesso di quanto ci serva ora.
+            # Per ora, la soluzione più pulita è lasciare che PTB gestisca il suo webhook
+            # e la route / webhook sia gestita direttamente dall'Application.
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
 
-        except TypeError as e:
-            logging.warning(f"application.run_webhook() non supporta 'app': {e}. Utilizzo del fallback.")
-            
-            logging.debug("Tentativo di impostare il webhook su Telegram (async) via PTB...")
-            _bot_loop.run_until_complete(application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES))
-            logging.debug("Webhook impostato (manualmente/fallback) per PTB.")
+        logging.debug("Application in webhook avviata su Render con PTB integrato.")
 
-            logging.debug("Avvio del server Flask nel thread principale per gestire i webhook.")
-            flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-            logging.debug("Flask server avviato e in ascolto.")
+        # L'applicazione continua a girare finché l'event loop è attivo
+        # Non c'è bisogno di flask_app.run() o run_polling
+        # application.run_webhook(...) è un metodo bloccante in PTB < v20,
+        # ma start_webhook (usato con await) è non bloccante.
+        # Per mantenere il bot in ascolto indefinitamente, puoi usare:
+        await application.updater.idle()
 
-    else:
-        logging.debug("Ambiente Replit rilevato, avvio bot in modalità polling...")
+
+    else: # Ambiente Replit (o locale)
+        logging.debug("Ambiente Replit rilevato, avvio bot in modalità polling.")
+        # Avvia il server Flask in un thread separato per il keep-alive di Replit
         threading.Thread(target=run_flask_server, daemon=True).start()
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        # Avvia l'Application in modalità polling
+        await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         logging.debug("Application in polling avviata su Replit.")
 
     logging.debug("L'applicazione Telegram Bot è in esecuzione (o in attesa di richieste).")
@@ -390,7 +405,8 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        # Avvia la funzione main asincrona
+        asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Bot interrotto manualmente.")
     except Exception as e:
