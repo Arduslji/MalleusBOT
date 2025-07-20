@@ -287,102 +287,73 @@ def run_flask_server():
 
 
 # --- La funzione main deve essere asincrona ---
+# --- La funzione main deve essere asincrona ---
 async def main():
-    global _bot_app
-
+    # Recupero variabili d’ambiente
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logging.error("Errore: token TELEGRAM_BOT_TOKEN non trovato. Assicurati che sia nelle variabili d'ambiente di Replit Secrets o Render.")
-        os._exit(1)
+        logging.error("Errore: token TELEGRAM_BOT_TOKEN non trovato.")
+        sys.exit(1)
 
     application = Application.builder().token(token).build()
-    _bot_app = application
-    
-    # Inizializzazione dell'Application PTB
+
+    # Initialize PTB
     logging.debug("Inizializzazione dell'Application PTB...")
     await application.initialize()
     logging.debug("Application PTB inizializzata.")
-    
+
+    # Handlers...
     application.add_handler(CommandHandler("stopantiflood", handle_stopantiflood))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
-    # Scheduler di apertura/chiusura
-    scheduler.add_job(
-        lambda: asyncio.create_task(schedule_announce(OPENING_MESSAGE)),
-        CronTrigger(hour=CLOSING_END_HOUR, minute=CLOSING_END_MINUTE, timezone=ZoneInfo("Europe/Rome")),
-        name="Chat Opening Announcement"
-    )
-    scheduler.add_job(
-        lambda: asyncio.create_task(schedule_announce(CLOSING_MESSAGE)),
-        CronTrigger(hour=CLOSING_START_HOUR, minute=CLOSING_START_MINUTE, timezone=ZoneInfo("Europe/Rome")),
-        name="Chat Closing Announcement"
-    )
+    # Scheduler...
     scheduler.start()
     logging.debug("BackgroundScheduler avviato")
 
-    # --- INIZIO BLOCCO DI AVVIO CONDIZIONALE PER RENDER ---
+    # Scegli modalità in base all'ambiente
     if os.getenv("RENDER"):
-        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-        if WEBHOOK_URL:
-            WEBHOOK_URL = f"https://{WEBHOOK_URL}/webhook"
-        else:
-            logging.error("Errore: Variabile d'ambiente RENDER_EXTERNAL_HOSTNAME non trovata su Render.")
-            os._exit(1)
+        # URL e porta forniti da Render
+        host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+        if not host:
+            logging.error("Errore: RENDER_EXTERNAL_HOSTNAME non trovato.")
+            sys.exit(1)
+        webhook_url = f"https://{host}/webhook"
+        port = int(os.getenv("PORT", 10000))
 
-        PORT = int(os.getenv("PORT", 8080))
-        ### <<< INSERISCI QUI >>> ###
-        # SICUREZZA: Recupera il secret token del webhook
-        # Questa riga è FONDAMENTALE e deve essere prima dell'uso di webhook_secret_token
+        # Secret token
         webhook_secret_token = os.getenv("WEBHOOK_SECRET_TOKEN")
         if not webhook_secret_token:
-            logging.critical("Errore: WEBHOOK_SECRET_TOKEN non impostato nelle variabili d'ambiente di Render. Necessario per la modalità webhook.")
+            logging.critical("Errore: WEBHOOK_SECRET_TOKEN non impostato.")
             sys.exit(1)
-        ### <<< FINE INSERIMENTO >>> ###
-        
-        logging.debug(f"Ambiente Render rilevato. Avvio bot in modalità webhook.")
-        logging.debug(f"Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
 
-        # **Questa è la modifica chiave per la Soluzione 1:**
-        # Avvia il server webhook integrato di PTB.
-        # PTB gestirà la ricezione del webhook e il passaggio degli update.
-        await application.updater.start_webhook(
+        logging.debug(f"Ambiente Render: avvio webhook su {webhook_url}:{port}")
+
+        # AVVIO IN MODALITÀ WEBHOOK
+        await application.run_webhook(
             listen="0.0.0.0",
-            port=PORT,
-            url_path="webhook", # Importante: SENZA lo slash iniziale qui per url_path di PTB
-            webhook_url=WEBHOOK_URL,
+            port=port,
+            url_path="webhook",
+            webhook_url=webhook_url,
             secret_token=webhook_secret_token,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
 
-        logging.debug("Application in webhook avviata su Render con PTB integrato.")
-
-        # Mantiene il bot in esecuzione indefinitamente in attesa di aggiornamenti
-await application.run_webhook(
-    listen="0.0.0.0",
-    port=10000,
-    url_path="webhook",
-    webhook_url="https://malleusbotweb.onrender.com/webhook",
-    secret_token=WEBHOOK_SECRET_TOKEN
-)
-
-
-
-    # --- ELSE per Replit (o ambiente locale di sviluppo) ---
     else:
-        logging.debug("Ambiente Replit/locale rilevato, avvio bot in modalità polling.")
-        # Avvia il server Flask in un thread separato per il keep-alive su Replit
+        # Ambiente locale / Replit
+        logging.debug("Ambiente locale: avvio polling")
+        # (se ti serve il flask keep-alive, lo avvii qui)
         threading.Thread(target=run_flask_server, daemon=True).start()
-        # Avvia l'Application in modalità polling
-        await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        logging.debug("Application in polling avviata su Replit.")
 
-    logging.debug("L'applicazione Telegram Bot è in esecuzione (o in attesa di richieste).")
+        # AVVIO IN MODALITÀ POLLING
+        await application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
 
+    # NOTA: non serve chiamare idle() né updater.idle()
 
 if __name__ == '__main__':
     try:
-        # Avvia la funzione main asincrona
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Bot interrotto manualmente.")
