@@ -317,7 +317,9 @@ def main():
         _bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_bot_loop)
     print(f"DEBUG: Event loop (_bot_loop) impostato: {_bot_loop}")
-
+    logging.debug("Inizializzazione dell'Application PTB...")
+    _bot_loop.run_until_complete(application.initialize())
+    logging.debug("Application PTB inizializzata.")
 
     application.add_handler(CommandHandler("stopantiflood", handle_stopantiflood))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
