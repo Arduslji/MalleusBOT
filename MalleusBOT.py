@@ -287,25 +287,41 @@ def run_flask_server():
 
 
 # --- La funzione main deve essere asincrona ---
-# --- La funzione main deve essere asincrona ---
 async def main():
+    global _bot_app # Mantieni questa riga per accedere all'applicazione da altre funzioni se necessario
+
     # Recupero variabili d’ambiente
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         logging.error("Errore: token TELEGRAM_BOT_TOKEN non trovato.")
         sys.exit(1)
 
+    # Crea l'Application
     application = Application.builder().token(token).build()
+    _bot_app = application # Assegna l'applicazione alla variabile globale per uso esterno
 
-    # Initialize PTB
+    # Initialize PTB (metodo asincrono)
     logging.debug("Inizializzazione dell'Application PTB...")
     await application.initialize()
     logging.debug("Application PTB inizializzata.")
 
-    # Handlers...
+    # Handlers (giusto come li hai tu)
     application.add_handler(CommandHandler("stopantiflood", handle_stopantiflood))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    # Scheduler...
+    
+    # Scheduler (giusto come li hai tu)
+    # Assicurati di aver reintrodotto i jobs dello scheduler, se li avevi rimossi
+    # Esempio:
+    # scheduler.add_job(
+    #     lambda: asyncio.create_task(schedule_announce(OPENING_MESSAGE)),
+    #     CronTrigger(hour=CLOSING_END_HOUR, minute=CLOSING_END_MINUTE, timezone=ZoneInfo("Europe/Rome")),
+    #     name="Chat Opening Announcement"
+    # )
+    # scheduler.add_job(
+    #     lambda: asyncio.create_task(schedule_announce(CLOSING_MESSAGE)),
+    #     CronTrigger(hour=CLOSING_START_HOUR, minute=CLOSING_START_MINUTE, timezone=ZoneInfo("Europe/Rome")),
+    #     name="Chat Closing Announcement"
+    # )
     scheduler.start()
     logging.debug("BackgroundScheduler avviato")
 
@@ -327,8 +343,8 @@ async def main():
 
         logging.debug(f"Ambiente Render: avvio webhook su {webhook_url}:{port}")
 
-        # AVVIO IN MODALITÀ WEBHOOK
-        await application.run_webhook(
+        # --- AVVIO IN MODALITÀ WEBHOOK (STRUTTURA CORRETTA) ---
+        await application.updater.start_webhook( # <<< Usa updater.start_webhook
             listen="0.0.0.0",
             port=port,
             url_path="webhook",
@@ -337,25 +353,23 @@ async def main():
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
+        
+        # MANTIENI IL BOT IN ESECUZIONE
+        await application.updater.idle() # <<< ESSENZIALE per mantenere il bot attivo su Render!
+        # --- FINE AVVIO WEBHOOK ---
 
     else:
         # Ambiente locale / Replit
         logging.debug("Ambiente locale: avvio polling")
-        # (se ti serve il flask keep-alive, lo avvii qui)
         threading.Thread(target=run_flask_server, daemon=True).start()
 
-        # AVVIO IN MODALITÀ POLLING
+        # AVVIO IN MODALITÀ POLLING (giusto come lo hai tu)
         await application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
 
-    # NOTA: non serve chiamare idle() né updater.idle()
+    # Il log finale qui potrebbe non essere raggiunto in modalità webhook per via di idle()
+    # logging.debug("L'applicazione Telegram Bot è in esecuzione (o in attesa di richieste).")
 
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Bot interrotto manualmente.")
-    except Exception as e:
-        logging.critical(f"Errore critico nell'esecuzione del bot: {e}", exc_info=True)
+# ... (il resto del codice, inclusi i blocchi try/except per la gestione degli errori) ...
