@@ -342,7 +342,7 @@ async def main():
             port=PORT,
             url_path="webhook", # Importante: SENZA lo slash iniziale qui per url_path di PTB
             webhook_url=WEBHOOK_URL,
-            secret_token=token,
+            secret_token=webhook_secret_token,
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
