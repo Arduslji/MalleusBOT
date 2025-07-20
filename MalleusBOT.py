@@ -1,5 +1,17 @@
 import re
 import os
+async def main():
+    global _bot_app
+
+    # DEBUG: Stampa il valore di RENDER_EXTERNAL_HOSTNAME
+    logging.debug(f"DEBUG: RENDER_EXTERNAL_HOSTNAME = {os.getenv('RENDER_EXTERNAL_HOSTNAME')}")
+    logging.debug(f"DEBUG: PORT = {os.getenv('PORT')}")
+
+    # Recupero variabili d’ambiente
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logging.error("Errore: token TELEGRAM_BOT_TOKEN non trovato.")
+        sys.exit(1)
 import datetime
 import time
 import threading
