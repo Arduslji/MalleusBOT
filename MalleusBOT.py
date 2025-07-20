@@ -355,7 +355,7 @@ async def main():
         )
         
         # MANTIENI IL BOT IN ESECUZIONE
-        await application.updater.idle() # <<< ESSENZIALE per mantenere il bot attivo su Render!
+        await asyncio.Event().wait() # <<< ESSENZIALE per mantenere il bot attivo su Render!
         # --- FINE AVVIO WEBHOOK ---
 
     else:
