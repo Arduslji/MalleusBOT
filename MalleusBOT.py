@@ -10,7 +10,7 @@ from collections import deque
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from telegram.error import TelegramError
-from flask import Flask, request # IMPORTANTE: Aggiunto 'request' per gestire i webhook
+from flask import Flask, request # Importa 'request' per gestire gli update webhook
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -24,14 +24,10 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    # Questo endpoint serve per il keep-alive su Replit
-    # Su Render, serve come endpoint base per il Web Service
     return "Bot Telegram in esecuzione!"
 
-# IMPORTANTE: Questo endpoint gestirà gli aggiornamenti da Telegram quando il bot è su Render (modalità webhook).
 @flask_app.route('/webhook', methods=['POST'])
 async def telegram_webhook_handler():
-    # Verifica che la richiesta sia un JSON valido
     if not request.is_json:
         print("ERROR: Richiesta webhook non è JSON.")
         return "Bad Request: Not JSON", 400
@@ -41,26 +37,19 @@ async def telegram_webhook_handler():
         print("ERROR: Richiesta webhook JSON vuota.")
         return "Bad Request: Empty JSON", 400
 
-    # Crea un oggetto Update da Python Telegram Bot
     try:
-        # Usa _bot_app.bot che è già inizializzato in main()
-        # È fondamentale che _bot_app sia stato inizializzato correttamente in main()
         update = Update.de_json(update_dict, _bot_app.bot)
     except Exception as e:
         print(f"ERROR: Errore durante la creazione dell'Update dal JSON: {e}")
         return "Internal Server Error: Failed to parse update", 500
 
-    # Processa l'update nell'event loop del bot.
-    # Usiamo asyncio.create_task per non bloccare la risposta HTTP di Flask.
     try:
-        # Assicurati che _bot_app sia disponibile e che il suo event loop sia in esecuzione.
-        # process_update è un metodo asincrono, quindi va schedulato.
         asyncio.create_task(_bot_app.process_update(update))
     except Exception as e:
         print(f"ERROR: Errore durante l'elaborazione dell'update da parte dell'Application: {e}")
         return "Internal Server Error: Failed to process update", 500
 
-    return "OK", 200 # Risponde a Telegram che l'update è stato ricevuto
+    return "OK", 200
 
 # --- Configurazione ---
 AUTHORIZED_CHAT_IDS = [-1002254924397] # *** Ricorda di verificare e aggiornare questo Chat ID ***
@@ -97,7 +86,14 @@ scheduler = BackgroundScheduler(timezone=ZoneInfo("Europe/Rome"))
 
 # --- Funzioni di controllo ---
 def has_forbidden_chars(name: str) -> bool:
+    # Aggiornato regex per essere più esplicito sui caratteri non latini
+    # Questa regex cerca qualsiasi carattere che NON sia un carattere ASCII stampabile
+    # o uno spazio. Potrebbe essere troppo aggressiva se si vogliono solo caratteri non latini.
+    # Una versione più mirata per "non latini" potrebbe essere:
+    # return bool(re.search(r'[^a-zA-Z0-9\s.,!?-]', name)) # Se vuoi bloccare solo simboli
+    # Per i caratteri Unicode non latini, la regex originale (o una simile) è più appropriata:
     return bool(re.search(r'[\u0590-\u05FF\u0600-\u06FF\u4E00-\u9FFF]', name))
+
 
 def has_forbidden_keywords_name(name: str) -> bool:
     return any(k in name.lower() for k in FORBIDDEN_KEYWORDS_NAME)
@@ -150,11 +146,15 @@ async def handle_stopantiflood(update: Update, context: ContextTypes.DEFAULT_TYP
     global flood_active, flood_timer
     chat_id = update.effective_chat.id
     if chat_id not in AUTHORIZED_CHAT_IDS:
+        print(f"DEBUG: Comando /stopantiflood da chat non autorizzata: {chat_id}") # Log aggiunto
         return
     member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
     if member.status in ("administrator", "creator"):
         await _deactivate_flood(chat_id)
         print(f"DEBUG: /stopantiflood eseguito da admin in chat {chat_id}")
+    else:
+        print(f"DEBUG: /stopantiflood tentato da utente non admin in chat {chat_id}") # Log aggiunto
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global flood_active, flood_queue, flood_timer
@@ -167,10 +167,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
 
     if chat_id not in AUTHORIZED_CHAT_IDS:
+        print(f"DEBUG: Messaggio da chat non autorizzata: {chat_id}") # Log aggiunto
         return
 
     is_admin = False
-    if update.message.sender_chat:
+    if update.message.sender_chat: # Messaggio da canale linkato (sempre admin in pratica)
         is_admin = True
     elif user:
         try:
@@ -189,17 +190,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not flood_active and len(flood_queue) >= FLOOD_THRESHOLD:
             flood_active = True
             await context.bot.send_message(chat_id, "⚔️ Chat sotto attacco, modalità difensiva attivata! ⚔️ \n\n    ⏳ La discussione viene sospesa per 3 minuti ⏳ \n\n      🧹 Qualunque messaggio sarà cancellato 🧹")
-            # Assicurati che _bot_loop sia disponibile prima di tentare di usarlo
             current_loop = _bot_loop if _bot_loop else asyncio.get_event_loop()
-            if current_loop.is_running(): # Verifica se l'event loop è effettivamente in esecuzione
+            if current_loop.is_running():
                 flood_timer = threading.Timer(FLOOD_DURATION, lambda: asyncio.run_coroutine_threadsafe(_deactivate_flood(chat_id), current_loop))
                 flood_timer.start()
             else:
                 print("WARN: Impossibile avviare il timer antiflood: l'event loop non è in esecuzione.")
             print(f"DEBUG: Antiflood attivato in chat {chat_id}, timer avviato")
         if flood_active:
-            await context.bot.delete_message(chat_id, msg_id)
-            print(f"DEBUG: Messaggio {msg_id} cancellato per antiflood in chat {chat_id}")
+            try: # Aggiunto try-except per la cancellazione del messaggio in caso di errori permessi
+                await context.bot.delete_message(chat_id, msg_id)
+                print(f"DEBUG: Messaggio {msg_id} cancellato per antiflood in chat {chat_id}")
+            except TelegramError as e:
+                print(f"WARN: Impossibile cancellare messaggio {msg_id} per antiflood in chat {chat_id}: {e}")
             return
 
     if user and not is_admin:
@@ -208,43 +211,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         identifier = f"{name} (@{uname})" if uname else name
 
         if has_forbidden_chars(name):
-            await context.bot.delete_message(chat_id, msg_id)
-            await context.bot.ban_chat_member(chat_id, user.id)
-            await context.bot.send_message(
-                chat_id,
-                text=f"🔥 𝔇𝔞𝔪𝔫𝔞𝔱𝔲𝔰 𝔢𝔰𝔱 𝔡𝔢 𝔟𝔩𝔞𝔰𝔭𝔥𝔢𝔪𝔦𝔞 𝔢𝔱 𝔟𝔯𝔞𝔠𝔥𝔦𝔬 𝔰𝔞𝔢𝔠𝔲𝔩𝔞𝔯𝔦 𝔱𝔯𝔞𝔡𝔦𝔪𝔲𝔰 🔥 **{name}**",
-                parse_mode='Markdown'
-            )
+            print(f"DEBUG: Utente {identifier} con nome contenente caratteri non latini. Tentativo di blocco.") # Log aggiunto
+            try: # Aggiunto try-except per ban in caso di errori permessi
+                await context.bot.delete_message(chat_id, msg_id)
+                await context.bot.ban_chat_member(chat_id, user.id)
+                await context.bot.send_message(
+                    chat_id,
+                    text=f"🔥 𝔇𝔞𝔪𝔫𝔞𝔱𝔲𝔰 𝔢𝔰𝔱 𝔡𝔢 𝔟𝔩𝔞𝔰𝔭𝔥𝔢𝔪𝔦𝔞 𝔢𝔱 𝔟𝔯𝔞𝔠𝔥𝔦𝔬 𝔰𝔞𝔢𝔠𝔲𝔩𝔞𝔯𝔦 𝔱𝔯𝔞𝔡𝔦𝔪𝔲𝔰 🔥 **{name}**",
+                    parse_mode='Markdown'
+                )
+                print(f"DEBUG: Utente {identifier} bannato e messaggio cancellato per caratteri non latini.") # Log aggiunto
+            except TelegramError as e:
+                print(f"WARN: Impossibile bannare {identifier} o cancellare messaggio per caratteri non latini in chat {chat_id}: {e}")
             return
 
         if identifier and has_forbidden_keywords_name(identifier):
-            await context.bot.delete_message(chat_id, msg_id)
-            await context.bot.ban_chat_member(chat_id, user.id)
-            await context.bot.send_message(
-                chat_id,
-                text=f"🚫 Utente **{identifier}** rimosso per termini non consentiti nel nome.",
-                parse_mode='Markdown'
-            )
+            print(f"DEBUG: Utente {identifier} con nome contenente keyword proibite. Tentativo di blocco.") # Log aggiunto
+            try:
+                await context.bot.delete_message(chat_id, msg_id)
+                await context.bot.ban_chat_member(chat_id, user.id)
+                await context.bot.send_message(
+                    chat_id,
+                    text=f"🚫 Utente **{identifier}** rimosso per termini non consentiti nel nome.",
+                    parse_mode='Markdown'
+                )
+                print(f"DEBUG: Utente {identifier} bannato e messaggio cancellato per keyword proibite nel nome.") # Log aggiunto
+            except TelegramError as e:
+                print(f"WARN: Impossibile bannare {identifier} o cancellare messaggio per keyword proibite nel nome in chat {chat_id}: {e}")
             return
 
     text = update.message.text or update.message.caption or ""
     if not is_admin and len(text) > MAX_MESSAGE_LENGTH:
         await context.bot.send_message(chat_id, text=f"❌ {user.full_name}, il tuo messaggio è troppo lungo ({len(text)} caratteri). Il limite massimo è {MAX_MESSAGE_LENGTH} caratteri. Il messaggio è stato rimosso 📜🔥")
         print(f"DEBUG: Messaggio {msg_id} cancellato per lunghezza eccessiva in chat {chat_id}")
-        await context.bot.delete_message(chat_id, msg_id)
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+        except TelegramError as e:
+            print(f"WARN: Impossibile cancellare messaggio {msg_id} per lunghezza eccessiva in chat {chat_id}: {e}")
         return
 
     ents = update.message.entities or update.message.caption_entities
     if not is_admin and contains_blocked_web_domain(ents, text):
-        
+        print(f"DEBUG: Messaggio {msg_id} contiene dominio web bloccato. Tentativo di cancellazione.") # Log aggiunto
         await context.bot.send_message(chat_id, text=f"🚫 {user.full_name}, sei pregato di non portare nella nostra chat la spazzatura della falsa controinformazione. Il contenuto è stato rimosso 🚽")
-        print(f"DEBUG: Messaggio {msg_id} cancellato per dominio web bloccato in chat {chat_id}")
-        await context.bot.delete_message(chat_id, msg_id)
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+            print(f"DEBUG: Messaggio {msg_id} cancellato per dominio web bloccato in chat {chat_id}")
+        except TelegramError as e:
+            print(f"WARN: Impossibile cancellare messaggio {msg_id} per dominio web bloccato in chat {chat_id}: {e}")
         return
 
     if not is_admin and text and has_forbidden_keywords_message(text):
-        await context.bot.delete_message(chat_id, msg_id)
-        print(f"DEBUG: Messaggio {msg_id} cancellato per parole chiave vietate in chat {chat_id}")
+        print(f"DEBUG: Messaggio {msg_id} contiene parole chiave vietate. Tentativo di cancellazione.") # Log aggiunto
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+            print(f"DEBUG: Messaggio {msg_id} cancellato per parole chiave vietate in chat {chat_id}")
+        except TelegramError as e:
+            print(f"WARN: Impossibile cancellare messaggio {msg_id} per parole chiave vietate in chat {chat_id}: {e}")
         return
 
 async def send_chat_status_message(bot, message: str, chat_id=None):
@@ -265,21 +288,15 @@ async def send_chat_status_message(bot, message: str, chat_id=None):
 def schedule_announce(message: str):
     async def announce():
         await send_chat_status_message(_bot_app.bot, message)
-    # Assicurati che _bot_loop sia disponibile prima di tentare di usarlo
     current_loop = _bot_loop if _bot_loop else asyncio.get_event_loop()
     if current_loop.is_running():
         current_loop.call_soon_threadsafe(lambda: asyncio.create_task(announce()))
     else:
         print("WARN: Event loop non avviato o non in esecuzione per schedule_announce. Ignorando l'annuncio.")
 
-# Questa funzione Flask è per l'avvio del server web.
-# Verrà usata in modo diverso a seconda che il bot sia su Replit o Render.
 def run_flask_server():
     port = int(os.getenv("PORT", 8080))
     print(f"DEBUG: Avvio Flask server sulla porta {port} (per Replit keep-alive)")
-    # Quando si usa flask_app.run(), il thread principale di Flask viene bloccato.
-    # Questo è OK per Replit (che vuole un server in ascolto)
-    # e anche per Render (che si aspetta che il Web Service ascolti su quella porta).
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     print("DEBUG: Flask server avviato.")
 
@@ -294,9 +311,6 @@ def main():
     application = Application.builder().token(token).build()
     _bot_app = application
     
-    # Imposta l'event loop di riferimento.
-    # Questo deve avvenire PRIMA di chiamare `run_polling` o `run_webhook`
-    # perché entrambi avvieranno l'event loop.
     try:
         _bot_loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -324,79 +338,59 @@ def main():
 
     # --- INIZIO BLOCCO DI AVVIO CONDIZIONALE PER REPLIT / RENDER ---
     if os.getenv("RENDER"):
-        # Siamo su Render (Web Service)
-        # Il server Flask deve essere avviato nel thread principale
-        # per gestire i webhook e rispondere alle richieste HTTP di Render.
-        # Python-Telegram-Bot si collegherà a questo server Flask.
-
-        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME") # Render fornisce l'hostname esterno
+        # Siamo su Render. Il server Flask DEVE girare nel thread principale
+        # per rispondere alle richieste HTTP di Render.
+        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME")
         if WEBHOOK_URL:
-            # Costruiamo l'URL completo del webhook, inclusa la porta se non è standard 443
-            # Render solitamente gestisce il routing sulla porta 443 per l'HTTPS
-            # e inoltra alla porta interna del tuo servizio (es. 8080).
-            # L'URL del webhook sarà https://<RENDER_EXTERNAL_HOSTNAME>/webhook
-            WEBHOOK_URL = f"https://{WEBHOOK_URL}/webhook"
+            WEBHOOK_URL = f"https://{WEBHOOK_URL}/webhook" # Il nostro endpoint Flask per il webhook
         else:
             print("Errore: Variabile d'ambiente RENDER_EXTERNAL_HOSTNAME non trovata su Render.")
-            os._exit(1) # Termina se non riusciamo a ottenere l'URL
+            os._exit(1)
 
-        PORT = int(os.getenv("PORT", 8080)) # Render imposta questa variabile per la porta interna
+        PORT = int(os.getenv("PORT", 8080))
 
         print(f"DEBUG: Ambiente Render rilevato. Avvio bot in modalità webhook.")
         print(f"DEBUG: Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
 
-        # Configura l'application di PTB per il webhook
-        # application.run_webhook() avvierà un server web interno per PTB.
-        # Per integrare con Flask, dobbiamo usare `app=flask_app` (se la versione di PTB lo supporta)
-        # o gestire manualmente gli update. Dato che abbiamo già un handler Flask,
-        # useremo quello e faremo in modo che PTB imposti solo il webhook su Telegram.
-
-        # Imposta il webhook su Telegram (il bot lo farà automaticamente quando run_webhook è chiamato)
-        # Non è necessario chiamare set_webhook() manualmente qui, run_webhook() lo fa.
-        
-        # Avvia l'application in modalità webhook, usando il server Flask esistente
-        # NOTA: Se la tua versione di python-telegram-bot è < 21.2, `app=flask_app` non funzionerà.
-        # In quel caso, dovresti rimuovere `app=flask_app` e affidarti solo all'handler Flask
-        # che abbiamo definito (`telegram_webhook_handler`).
-        # Per ora, assumiamo una versione compatibile o che il fallback funzioni.
         try:
+            # Tenta la modalità moderna: run_webhook integra Flask.
+            print("DEBUG: Tentativo di avviare application.run_webhook con app=flask_app...")
             application.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
-                url_path="/webhook", # Il percorso che Telegram userà per inviare gli update
+                url_path="/webhook",
                 webhook_url=WEBHOOK_URL,
-                app=flask_app, # Passiamo l'istanza Flask per l'integrazione
+                app=flask_app, # Richiede python-telegram-bot >= 21.2
                 drop_pending_updates=True
             )
-        except TypeError as e:
-            print(f"WARN: application.run_webhook() non supporta 'app': {e}. Tentativo di avvio Flask separato.")
-            # Fallback per versioni più vecchie di PTB che non supportano `app=flask_app`
-            # In questo caso, il server Flask deve essere avviato in un thread separato
-            # e Render si aspetterà che risponda sulla porta.
-            threading.Thread(target=run_flask_server, daemon=True).start()
-            # E l'Application di PTB deve essere avviata per processare gli update
-            application.start() # Avvia l'Application senza polling/webhook interno
-            # Assicurati che il webhook sia impostato manualmente se non lo fa run_webhook
-            # await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-            print("DEBUG: Webhook impostato manualmente (o tramite Render) per PTB.")
-            print("DEBUG: Application PTB avviata per elaborazione update.")
-            # Il loop principale deve essere mantenuto attivo, ma non bloccato da run_polling.
-            # Questo è il punto più delicato: un Web Service su Render deve avere un processo
-            # che ascolta sulla porta HTTP. Il nostro Flask lo farà.
-            # Il bot PTB deve solo essere "avviato" per registrare gli handler.
-            # La chiamata a flask_app.run() è bloccante e manterrà il processo vivo.
-            # Non abbiamo bisogno di application.idle() qui.
+            print("DEBUG: Application in webhook avviata su Render con Flask integrato.")
+            # Questa chiamata è bloccante e manterrà il servizio vivo.
 
-        print("DEBUG: Application in webhook avviata su Render.")
+        except TypeError as e:
+            # Questa è la WARN che stai vedendo. La versione di PTB è più vecchia.
+            print(f"WARN: application.run_webhook() non supporta 'app': {e}. Utilizzo del fallback.")
+            
+            # In modalità fallback, Flask deve avviare il server web nel thread principale e bloccarlo.
+            # L'Application PTB è già stata creata e i suoi handler registrati,
+            # e gli update verranno passati tramite l'handler Flask /webhook.
+            
+            # Dobbiamo assicurarci che Telegram conosca il webhook,
+            # dato che application.run_webhook non lo farà in questo caso.
+            # Chiamiamo set_webhook una volta, eseguendola nel loop di asyncio.
+            print("DEBUG: Tentativo di impostare il webhook su Telegram (async) via PTB...")
+            _bot_loop.run_until_complete(application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES))
+            print("DEBUG: Webhook impostato (manualmente/fallback) per PTB.")
+
+            # Avvia il server Flask nel thread principale (questa chiamata è bloccante)
+            # e manterrà il servizio Render vivo.
+            print("DEBUG: Avvio del server Flask nel thread principale per gestire i webhook.")
+            flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+            print("DEBUG: Flask server avviato e in ascolto.")
 
     else:
-        # Siamo su Replit (o ambiente locale senza RENDER env var)
-        # Avviamo il server Flask in un thread separato per il keep-alive di Replit
+        # Su Replit o ambiente locale: polling con Flask in un thread separato per keep-alive.
+        print("DEBUG: Ambiente Replit rilevato, avvio bot in modalità polling...")
         threading.Thread(target=run_flask_server, daemon=True).start()
-        print("DEBUG: Flask server avviato in thread separato (per Replit keep-alive).")
-        
-        # Avvia il bot in modalità polling
-        print("DEBUG: Ambiente Replit rilevato, avvio bot in modalità polling con drop_pending_updates=True...")
         application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         print("DEBUG: Application in polling avviata su Replit.")
 
@@ -409,9 +403,6 @@ def main():
 
 if __name__ == '__main__':
     try:
-        # Nota: asyncio.run() è usato solo per avviare la funzione main() se è asincrona.
-        # Dato che main() ora contiene logica di avvio bloccante (run_polling o flask_app.run),
-        # non la rendiamo async.
         main()
     except KeyboardInterrupt:
         print("Bot interrotto manualmente.")
