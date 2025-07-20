@@ -175,7 +175,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError as e:
             logging.warning(f"Impossibile ottenere stato membro per {user.id} in chat {chat_id}: {e}")
             pass
-
+    logging.debug(f"Utente {user.id} in chat {chat_id}: is_admin={is_admin}")
     if not is_admin:
         now = time.time()
         flood_queue.append(now)
