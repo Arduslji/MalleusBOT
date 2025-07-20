@@ -358,7 +358,15 @@ async def main():
         logging.debug("Application in webhook avviata su Render con PTB integrato.")
 
         # Mantiene il bot in esecuzione indefinitamente in attesa di aggiornamenti
-        await application.updater.idle()
+await application.run_webhook(
+    listen="0.0.0.0",
+    port=10000,
+    url_path="webhook",
+    webhook_url="https://malleusbotweb.onrender.com/webhook",
+    secret_token=WEBHOOK_SECRET_TOKEN
+)
+
+
 
     # --- ELSE per Replit (o ambiente locale di sviluppo) ---
     else:
