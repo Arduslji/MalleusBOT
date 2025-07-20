@@ -349,7 +349,8 @@ async def main():
             port=PORT,
             url_path="webhook", # Importante: SENZA lo slash iniziale qui per url_path di PTB
             webhook_url=WEBHOOK_URL,
-            secret_token=os.getenv("WEBHOOK_SECRET_TOKEN", "my_secret_token_here"), # Usa una variabile d'ambiente o una stringa predefinita semplice
+            secret_token=os.getenv("WEBHOOK_SECRET_TOKEN", "a8K2j3PqX7wZ1nB6H4dR9vLcQ0uM5tS
+"), # Usa una variabile d'ambiente o una stringa predefinita semplice
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
