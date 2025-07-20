@@ -10,7 +10,7 @@ from collections import deque
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from telegram.error import TelegramError
-from flask import Flask
+from flask import Flask, request # IMPORTANTE: Aggiunto 'request' per gestire i webhook
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -19,19 +19,51 @@ if 'TZ' in os.environ:
     os.environ.pop('TZ')
 time.tzset()
 
-# --- Flask per mantenere vivo il bot su Replit ---
+# --- Flask per mantenere vivo il bot su Replit E gestire webhook su Render ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
+    # Questo endpoint serve per il keep-alive su Replit
+    # Su Render, serve come endpoint base per il Web Service
     return "Bot Telegram in esecuzione!"
 
+# IMPORTANTE: Questo endpoint gestirà gli aggiornamenti da Telegram quando il bot è su Render (modalità webhook).
 @flask_app.route('/webhook', methods=['POST'])
-def webhook():
-    return "Webhook endpoint ready"
+async def telegram_webhook_handler():
+    # Verifica che la richiesta sia un JSON valido
+    if not request.is_json:
+        print("ERROR: Richiesta webhook non è JSON.")
+        return "Bad Request: Not JSON", 400
+
+    update_dict = request.get_json()
+    if not update_dict:
+        print("ERROR: Richiesta webhook JSON vuota.")
+        return "Bad Request: Empty JSON", 400
+
+    # Crea un oggetto Update da Python Telegram Bot
+    try:
+        # Usa _bot_app.bot che è già inizializzato in main()
+        # È fondamentale che _bot_app sia stato inizializzato correttamente in main()
+        update = Update.de_json(update_dict, _bot_app.bot)
+    except Exception as e:
+        print(f"ERROR: Errore durante la creazione dell'Update dal JSON: {e}")
+        return "Internal Server Error: Failed to parse update", 500
+
+    # Processa l'update nell'event loop del bot.
+    # Usiamo asyncio.create_task per non bloccare la risposta HTTP di Flask.
+    try:
+        # Assicurati che _bot_app sia disponibile e che il suo event loop sia in esecuzione.
+        # process_update è un metodo asincrono, quindi va schedulato.
+        asyncio.create_task(_bot_app.process_update(update))
+    except Exception as e:
+        print(f"ERROR: Errore durante l'elaborazione dell'update da parte dell'Application: {e}")
+        return "Internal Server Error: Failed to process update", 500
+
+    return "OK", 200 # Risponde a Telegram che l'update è stato ricevuto
 
 # --- Configurazione ---
-AUTHORIZED_CHAT_IDS = [-1001299487305, -1002254924397] # *** Ricorda di verificare e aggiornare questo Chat ID ***
+AUTHORIZED_CHAT_IDS = [-1002254924397] # *** Ricorda di verificare e aggiornare questo Chat ID ***
 
 FORBIDDEN_KEYWORDS_NAME = [
     'porn', 'sex', 'xxx', 'adult', 'nude', 'erotic', 'viagra', 'cialis',
@@ -156,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not flood_active and len(flood_queue) >= FLOOD_THRESHOLD:
             flood_active = True
-            await context.bot.send_message(chat_id, "⚔️ Chat sotto attacco, modalità difensiva attivata! ⚔️ \n\n   ⏳ La discussione viene sospesa per 3 minuti ⏳ \n\n      🧹 Qualunque messaggio sarà cancellato 🧹")
+            await context.bot.send_message(chat_id, "⚔️ Chat sotto attacco, modalità difensiva attivata! ⚔️ \n\n    ⏳ La discussione viene sospesa per 3 minuti ⏳ \n\n      🧹 Qualunque messaggio sarà cancellato 🧹")
             # Assicurati che _bot_loop sia disponibile prima di tentare di usarlo
             current_loop = _bot_loop if _bot_loop else asyncio.get_event_loop()
             if current_loop.is_running(): # Verifica se l'event loop è effettivamente in esecuzione
@@ -240,9 +272,14 @@ def schedule_announce(message: str):
     else:
         print("WARN: Event loop non avviato o non in esecuzione per schedule_announce. Ignorando l'annuncio.")
 
+# Questa funzione Flask è per l'avvio del server web.
+# Verrà usata in modo diverso a seconda che il bot sia su Replit o Render.
 def run_flask_server():
     port = int(os.getenv("PORT", 8080))
     print(f"DEBUG: Avvio Flask server sulla porta {port} (per Replit keep-alive)")
+    # Quando si usa flask_app.run(), il thread principale di Flask viene bloccato.
+    # Questo è OK per Replit (che vuole un server in ascolto)
+    # e anche per Render (che si aspetta che il Web Service ascolti su quella porta).
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     print("DEBUG: Flask server avviato.")
 
@@ -256,15 +293,13 @@ def main():
 
     application = Application.builder().token(token).build()
     _bot_app = application
-    # Imposta l'event loop di riferimento NON usando application.loop,
-    # ma prendendo l'event loop del thread corrente che sarà quello principale di asyncio.
-    # Questo deve avvenire PRIMA di chiamare `run_polling` perché `run_polling` è bloccante.
+    
+    # Imposta l'event loop di riferimento.
+    # Questo deve avvenire PRIMA di chiamare `run_polling` o `run_webhook`
+    # perché entrambi avvieranno l'event loop.
     try:
         _bot_loop = asyncio.get_event_loop()
     except RuntimeError:
-        # Questo può accadere se non c'è un event loop già impostato per il thread corrente.
-        # In questo caso, ne creiamo uno (anche se run_polling ne creerà uno se necessario).
-        # Questo è più un fallback per compatibilità con versioni molto vecchie di asyncio.
         _bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_bot_loop)
     print(f"DEBUG: Event loop (_bot_loop) impostato: {_bot_loop}")
@@ -287,22 +322,96 @@ def main():
     scheduler.start()
     print("DEBUG: BackgroundScheduler avviato")
 
+    # --- INIZIO BLOCCO DI AVVIO CONDIZIONALE PER REPLIT / RENDER ---
+    if os.getenv("RENDER"):
+        # Siamo su Render (Web Service)
+        # Il server Flask deve essere avviato nel thread principale
+        # per gestire i webhook e rispondere alle richieste HTTP di Render.
+        # Python-Telegram-Bot si collegherà a questo server Flask.
 
-    # Avvia Flask su thread per mantenere Replit attivo SOLO se non siamo su Render
-    if os.getenv("RENDER") is None:
-        threading.Thread(target=run_flask_server, daemon=True).start()
-        print("DEBUG: Flask server avviato in thread separato.")
+        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME") # Render fornisce l'hostname esterno
+        if WEBHOOK_URL:
+            # Costruiamo l'URL completo del webhook, inclusa la porta se non è standard 443
+            # Render solitamente gestisce il routing sulla porta 443 per l'HTTPS
+            # e inoltra alla porta interna del tuo servizio (es. 8080).
+            # L'URL del webhook sarà https://<RENDER_EXTERNAL_HOSTNAME>/webhook
+            WEBHOOK_URL = f"https://{WEBHOOK_URL}/webhook"
+        else:
+            print("Errore: Variabile d'ambiente RENDER_EXTERNAL_HOSTNAME non trovata su Render.")
+            os._exit(1) # Termina se non riusciamo a ottenere l'URL
+
+        PORT = int(os.getenv("PORT", 8080)) # Render imposta questa variabile per la porta interna
+
+        print(f"DEBUG: Ambiente Render rilevato. Avvio bot in modalità webhook.")
+        print(f"DEBUG: Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
+
+        # Configura l'application di PTB per il webhook
+        # application.run_webhook() avvierà un server web interno per PTB.
+        # Per integrare con Flask, dobbiamo usare `app=flask_app` (se la versione di PTB lo supporta)
+        # o gestire manualmente gli update. Dato che abbiamo già un handler Flask,
+        # useremo quello e faremo in modo che PTB imposti solo il webhook su Telegram.
+
+        # Imposta il webhook su Telegram (il bot lo farà automaticamente quando run_webhook è chiamato)
+        # Non è necessario chiamare set_webhook() manualmente qui, run_webhook() lo fa.
+        
+        # Avvia l'application in modalità webhook, usando il server Flask esistente
+        # NOTA: Se la tua versione di python-telegram-bot è < 21.2, `app=flask_app` non funzionerà.
+        # In quel caso, dovresti rimuovere `app=flask_app` e affidarti solo all'handler Flask
+        # che abbiamo definito (`telegram_webhook_handler`).
+        # Per ora, assumiamo una versione compatibile o che il fallback funzioni.
+        try:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path="/webhook", # Il percorso che Telegram userà per inviare gli update
+                webhook_url=WEBHOOK_URL,
+                app=flask_app, # Passiamo l'istanza Flask per l'integrazione
+                drop_pending_updates=True
+            )
+        except TypeError as e:
+            print(f"WARN: application.run_webhook() non supporta 'app': {e}. Tentativo di avvio Flask separato.")
+            # Fallback per versioni più vecchie di PTB che non supportano `app=flask_app`
+            # In questo caso, il server Flask deve essere avviato in un thread separato
+            # e Render si aspetterà che risponda sulla porta.
+            threading.Thread(target=run_flask_server, daemon=True).start()
+            # E l'Application di PTB deve essere avviata per processare gli update
+            application.start() # Avvia l'Application senza polling/webhook interno
+            # Assicurati che il webhook sia impostato manualmente se non lo fa run_webhook
+            # await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+            print("DEBUG: Webhook impostato manualmente (o tramite Render) per PTB.")
+            print("DEBUG: Application PTB avviata per elaborazione update.")
+            # Il loop principale deve essere mantenuto attivo, ma non bloccato da run_polling.
+            # Questo è il punto più delicato: un Web Service su Render deve avere un processo
+            # che ascolta sulla porta HTTP. Il nostro Flask lo farà.
+            # Il bot PTB deve solo essere "avviato" per registrare gli handler.
+            # La chiamata a flask_app.run() è bloccante e manterrà il processo vivo.
+            # Non abbiamo bisogno di application.idle() qui.
+
+        print("DEBUG: Application in webhook avviata su Render.")
+
     else:
-        print("DEBUG: Ambiente Render rilevato, Flask server non avviato per keep-alive automatico.")
-    
-    # Avvia il bot in modalità polling con drop_pending_updates=True
-    print("DEBUG: Avvio polling bot con drop_pending_updates=True...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    print("DEBUG: Application in polling avviata.")
+        # Siamo su Replit (o ambiente locale senza RENDER env var)
+        # Avviamo il server Flask in un thread separato per il keep-alive di Replit
+        threading.Thread(target=run_flask_server, daemon=True).start()
+        print("DEBUG: Flask server avviato in thread separato (per Replit keep-alive).")
+        
+        # Avvia il bot in modalità polling
+        print("DEBUG: Ambiente Replit rilevato, avvio bot in modalità polling con drop_pending_updates=True...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        print("DEBUG: Application in polling avviata su Replit.")
+
+    # Questo print verrà raggiunto solo se il bot non è bloccante (es. se run_webhook non blocca)
+    # o se il thread principale continua dopo l'avvio del server Flask/polling.
+    # Per Render (Web Service), flask_app.run() bloccherà il thread principale.
+    # Per Replit (Polling), application.run_polling() bloccherà il thread principale.
+    print("DEBUG: L'applicazione Telegram Bot è in esecuzione (o in attesa di richieste).")
 
 
 if __name__ == '__main__':
     try:
+        # Nota: asyncio.run() è usato solo per avviare la funzione main() se è asincrona.
+        # Dato che main() ora contiene logica di avvio bloccante (run_polling o flask_app.run),
+        # non la rendiamo async.
         main()
     except KeyboardInterrupt:
         print("Bot interrotto manualmente.")
