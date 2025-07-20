@@ -7,10 +7,11 @@ from zoneinfo import ZoneInfo
 import asyncio
 from collections import deque
 import logging
+import sys # Importa sys per sys.exit()
 
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-from telegram.error import TelegramError
+from telegram.error import TelegramError, InvalidToken, NetworkError # Aggiunti InvalidToken e NetworkError
 from flask import Flask, request # Manteniamo Flask per la compatibilità Replit/home route
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,7 +20,6 @@ from apscheduler.triggers.cron import CronTrigger
 # Necessario per Replit ma può causare problemi su altri host come Render se impostata
 if 'TZ' in os.environ:
     os.environ.pop('TZ')
-    # time.tzset() # Rimuovi anche questa riga, tzset non è portabile e causa errori su alcuni sistemi
 
 # --- Configurazione base del logging (IMPORTANTE: deve essere all'inizio del file o in main) ---
 logging.basicConfig(level=logging.DEBUG,
@@ -34,13 +34,6 @@ def home():
     logging.debug("Richiesta GET alla root '/' ricevuta.")
     # Su Render, questa route non sarà toccata da Telegram, ma serve per un check di base del servizio
     return "Bot Telegram in esecuzione!"
-
-# Rimuoviamo la rotta Flask /webhook perché sarà gestita direttamente da PTB su Render
-# @flask_app.route('/webhook', methods=['POST'])
-# async def telegram_webhook_handler():
-#     # QUESTA FUNZIONE NON SERVE PIÙ QUANDO SI USA application.start_webhook DI PTB
-#     # Su Render, PTB gestirà direttamente la ricezione e il processamento degli update.
-#     pass
 
 # --- Configurazione ---
 AUTHORIZED_CHAT_IDS = [-1002254924397] # *** Ricorda di verificare e aggiornare questo Chat ID ***
@@ -189,7 +182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lambda t: asyncio.create_task(_deactivate_flood(chat_id))
             )
             logging.debug(f"Antiflood attivato in chat {chat_id}, timer avviato")
-        
+            
         if flood_active:
             try:
                 await context.bot.delete_message(chat_id, msg_id)
@@ -292,15 +285,15 @@ def run_flask_server():
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     logging.debug("Flask server avviato.")
 
-
 # --- La funzione main deve essere asincrona ---
 async def main():
     global _bot_app
 
+    # *** SICUREZZA: Recupera il token del bot dalle variabili d'ambiente ***
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logging.error("Errore: token TELEGRAM_BOT_TOKEN non trovato. Assicurati che sia nelle variabili d'ambiente di Replit Secrets o Render.")
-        os._exit(1)
+        logging.critical("Errore: TELEGRAM_BOT_TOKEN non impostato. Assicurati che sia nelle variabili d'ambiente.")
+        sys.exit(1) # Usa sys.exit per una terminazione più pulita
 
     application = Application.builder().token(token).build()
     _bot_app = application
@@ -333,24 +326,27 @@ async def main():
         if WEBHOOK_URL:
             WEBHOOK_URL = f"https://{WEBHOOK_URL}/webhook"
         else:
-            logging.error("Errore: Variabile d'ambiente RENDER_EXTERNAL_HOSTNAME non trovata su Render.")
-            os._exit(1)
+            logging.critical("Errore: Variabile d'ambiente RENDER_EXTERNAL_HOSTNAME non trovata su Render. Impossibile costruire l'URL del webhook.")
+            sys.exit(1) # Termina se l'hostname di Render non è disponibile
 
         PORT = int(os.getenv("PORT", 8080))
+
+        # *** SICUREZZA: Recupera il secret token del webhook ***
+        # Non fornire un fallback sensibile qui, Render DEVE fornire il valore.
+        webhook_secret_token = os.getenv("WEBHOOK_SECRET_TOKEN")
+        if not webhook_secret_token:
+            logging.critical("Errore: WEBHOOK_SECRET_TOKEN non impostato nelle variabili d'ambiente di Render. Necessario per la modalità webhook.")
+            sys.exit(1) # Termina se il secret token non è impostato
 
         logging.debug(f"Ambiente Render rilevato. Avvio bot in modalità webhook.")
         logging.debug(f"Webhook URL: {WEBHOOK_URL}, Porta di ascolto: {PORT}")
 
-        # **Questa è la modifica chiave per la Soluzione 1:**
-        # Avvia il server webhook integrato di PTB.
-        # PTB gestirà la ricezione del webhook e il passaggio degli update.
         await application.updater.start_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path="webhook", # Importante: SENZA lo slash iniziale qui per url_path di PTB
             webhook_url=WEBHOOK_URL,
-            secret_token=os.getenv("WEBHOOK_SECRET_TOKEN", "a8K2j3PqX7wZ1nB6H4dR9vLcQ0uM5tS
-"), # Usa una variabile d'ambiente o una stringa predefinita semplice
+            secret_token=webhook_secret_token, # Usa la variabile recuperata
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
@@ -371,12 +367,18 @@ async def main():
 
     logging.debug("L'applicazione Telegram Bot è in esecuzione (o in attesa di richieste).")
 
-
 if __name__ == '__main__':
     try:
         # Avvia la funzione main asincrona
         asyncio.run(main())
+    except InvalidToken:
+        logging.critical("Errore: Il TELEGRAM_BOT_TOKEN non è valido. Verifica le variabili d'ambiente.")
+        sys.exit(1) # Termina con codice di errore
+    except NetworkError as e:
+        logging.critical(f"Errore di rete grave. Impossibile connettersi a Telegram API: {e}", exc_info=True)
+        sys.exit(1) # Termina con codice di errore
     except KeyboardInterrupt:
-        logging.info("Bot interrotto manualmente.")
+        logging.info("Bot interrotto manualmente (KeyboardInterrupt).")
     except Exception as e:
-        logging.critical(f"Errore critico nell'esecuzione del bot: {e}", exc_info=True)
+        logging.critical(f"Errore critico inatteso nell'esecuzione del bot: {e}", exc_info=True)
+        sys.exit(1) # Termina con codice di errore
